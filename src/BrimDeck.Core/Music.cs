@@ -17,6 +17,9 @@ public sealed record MediaTrack
     public TimeSpan? CurrentLyricStart { get; init; }
     public bool IsQqMusic => Source == "QQ 音乐" || SongId.StartsWith("qq:", StringComparison.Ordinal) || SongId.StartsWith("qqid:", StringComparison.Ordinal);
     public bool IsAppleMusic => Source == "Apple Music";
+    // Kugou publishes the song and its controls through Windows media controls but no timeline, so its position is estimated
+    // (PlaybackClock) and its lyrics come from a public catalog (LyricsService).
+    public bool IsKugouMusic => Source == "酷狗音乐" || SongId.StartsWith("kugou:", StringComparison.Ordinal);
     public MediaState State { get; init; }
     public bool IsNeteaseLog { get; init; }
     public bool PreviousRestricted { get; init; }

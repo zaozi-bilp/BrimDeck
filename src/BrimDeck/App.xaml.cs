@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -27,13 +28,25 @@ public partial class App : Application
     // monitor gets a panel that shows the same data.
     public MainWindow Deck { get; private set; } = null!;
     private readonly Dictionary<string, MainWindow> _otherDecks = [];
-    public IEnumerable<MainWindow> Decks => _otherDecks.Values.Prepend(Deck);
+    // Split mode's second island on each monitor, by display id; empty when the islands are one.
+    private readonly Dictionary<string, MainWindow> _splitDecks = [];
+    public IEnumerable<MainWindow> Decks => _otherDecks.Values.Concat(_splitDecks.Values).Prepend(Deck);
     public IReadOnlyList<DisplayInfo> Displays { get; private set; } = [];
     private bool _arrangePending;
+    // A split turned on or off animates once, after the panels have been laid out; the old second island fades out and is
+    // retired after the slide.
+    private bool _splitShownLast, _splitTurningOn, _splitTurningOff;
+    private readonly List<MainWindow> _splitRetiring = [];
     // Every panel shows the one set of players, and their lyrics are looked up once.
     internal MediaSessions? Media { get; private set; }
     internal event Action? MediaChanged;
     internal LyricsService Lyrics { get; private set; } = null!;
+    // Kugou's own progress slider, read on a background UI Automation thread for exact lyric sync.
+    internal KugouProgressReader? KugouProgress { get; private set; }
+    // WeChat and QQ new-message popups, watched only for the collapsed notice and the unread badge; no message contents are read.
+    internal MessageWatcher? Wechat { get; private set; }
+    // A local JSON file through which other programs can push a short activity to the island.
+    internal ActivityBridge? Activity { get; private set; }
     // A window being dragged by its title bar or edge; the panels do not open on it (see MainWindow.TrackPointer).
     internal WindowDrags WindowDrags { get; private set; } = null!;
     private readonly HashSet<MainWindow> _presentingMedia = [], _presentingSystemAudio = [];
@@ -84,6 +97,7 @@ public partial class App : Application
         RecordCrashes();
         var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BrimDeck");
         Store = new SettingsStore(folder); Settings = Store.Load();
+        _splitShownLast = Settings.SplitShown;
         // Before anything is read: a reading left unanswered when the last run ended stops now (SensorGuard).
         SensorGuard.Start(folder);
         UseLanguage();
@@ -104,12 +118,24 @@ public partial class App : Application
         Updates = new AppUpdates(BrimDeck.Updates.GitHubUpdates.Create(folder), folder);
         Secrets = new ProviderSecrets(folder);
         Lyrics = new LyricsService(appleLyricsFile: Path.Combine(folder, "apple-music-lyrics.json"));
+        KugouProgress = new KugouProgressReader();
         Usage = new UsageService(new DesktopSources(), secrets: Secrets, quotaCache: Path.Combine(folder, ClaudeQuotaCache.FileName),
             kimiQuotaCache: Path.Combine(folder, KimiQuotaCache.FileName));
         WindowDrags = new WindowDrags();
         Deck = new MainWindow(this); MainWindow = Deck;
         Displays = Native.Displays.Current(); AssignDisplays();
         Deck.Show();
+        Wechat = new MessageWatcher(Dispatcher, ["Weixin", "WeChat", "WeChatAppEx"], WeChatNotice.Text,
+            text =>
+            {
+                foreach (var deck in Decks.ToArray()) deck.ShowMessageNotice(text);
+            }, () => Settings.WechatNotices);
+        Wechat.Start();
+        Activity = new ActivityBridge(Dispatcher, folder, (text, seconds) =>
+        {
+            foreach (var deck in Decks.ToArray()) deck.ShowMessageNotice(text, seconds, musicLaneOnly: false);
+        }, () => Settings.ActivityBridge);
+        Activity.Start();
         InitializeHotkeys();
         StartBackgroundUpdates();
         // Only for a user who has the monitor page with its power line: the rest never open it.
@@ -166,7 +192,7 @@ public partial class App : Application
         if (_settingsWindow is null)
         {
             _settingsWindow = new SettingsWindow(this);
-            _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+            _settingsWindow.Closed += (_, _) => { _settingsWindow = null; RequestTrim(); };
             _settingsWindow.Show();
             if (Store.LoadWarning is { } warning) _settingsWindow.SaveStatus(warning, true);
         }
@@ -274,6 +300,20 @@ public partial class App : Application
         Deck.Display = Displays.FirstOrDefault(d => d.Id == plan.Main);
         foreach (var id in _otherDecks.Keys.Except(plan.Others).ToList())
         { var deck = _otherDecks[id]; _otherDecks.Remove(id); deck.Retire(); }
+        // Split mode's second island follows the main panel's monitors. It is kept for the merge slide when the islands are
+        // one again, then retired by AnimateSplitTransition.
+        bool split = Settings.SplitShown;
+        _splitTurningOn = split && !_splitShownLast;
+        _splitTurningOff = !split && _splitShownLast;
+        _splitShownLast = split;
+        List<string> splitIds = split ? [.. plan.Others.Prepend(plan.Main)] : [];
+        foreach (var id in _splitDecks.Keys.Except(splitIds).ToList())
+        {
+            var deck = _splitDecks[id]; _splitDecks.Remove(id);
+            if (_splitTurningOff) _splitRetiring.Add(deck); else deck.Retire();
+        }
+        if (_splitTurningOn || _splitTurningOff)
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, AnimateSplitTransition);
         // Panels are opened only once the main panel runs, so that they can take its data.
         if (!Deck.IsLoaded) return;
         foreach (var id in plan.Others)
@@ -283,6 +323,41 @@ public partial class App : Application
             deck = new MainWindow(this, Deck) { Display = display };
             _otherDecks[id] = deck; deck.Show();
         }
+        foreach (var id in splitIds)
+        {
+            var display = Displays.First(d => d.Id == id);
+            if (_splitDecks.TryGetValue(id, out var deck)) { deck.Display = display; continue; }
+            deck = new MainWindow(this, Deck, lane: 1) { Display = display };
+            _splitDecks[id] = deck; deck.Show();
+        }
+        // A split left collapsed should settle to its idle memory; retiring a second island likewise gives its pages back.
+        RequestTrim();
+    }
+    // Runs after the settings pass has laid both islands out, so the slide starts from the places on screen.
+    private void AnimateSplitTransition()
+    {
+        if (Exiting) return;
+        bool turningOn = _splitTurningOn, turningOff = _splitTurningOff;
+        _splitTurningOn = _splitTurningOff = false;
+        if (turningOn)
+        {
+            foreach (var deck in Decks.ToArray()) deck.BeginSeparate(fadeIn: deck.Lane != 0);
+            return;
+        }
+        if (!turningOff) return;
+        foreach (var deck in Decks.Where(deck => deck.Lane == 0).ToArray()) deck.BeginMerge();
+        var retiring = _splitRetiring.ToList();
+        _splitRetiring.Clear();
+        foreach (var deck in retiring) deck.BeginMerge(fadeOut: true);
+        var timer = new DispatcherTimer(DispatcherPriority.Loaded) { Interval = TimeSpan.FromMilliseconds(320) };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            if (Exiting) return;
+            foreach (var deck in retiring) deck.Retire();
+            RequestTrim();
+        };
+        timer.Start();
     }
     internal void StartMedia()
     {
@@ -403,7 +478,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         Exiting = true; Lifetime.Cancel(); _save.Stop(); FinishWriting(); StopBackgroundUpdates(); DisplayPower.Uninstall(); Microsoft.Win32.SystemEvents.UserPreferenceChanged -= SystemThemeChanged; _tray?.Dispose(); DisposeHotkeys(); WindowDrags?.Dispose(); _listener?.Unregister(null); _settingsEvent?.Dispose();
-        Media?.Dispose(); Monitor?.Dispose(); SensorGuard.Finish(); Lyrics?.Dispose(); Prices?.Dispose(); _mutex?.Dispose(); base.OnExit(e);
+        Media?.Dispose(); Monitor?.Dispose(); SensorGuard.Finish(); Lyrics?.Dispose(); KugouProgress?.Dispose(); Wechat?.Dispose(); Activity?.Dispose(); Prices?.Dispose(); _mutex?.Dispose(); base.OnExit(e);
     }
     [DllImport("shell32", CharSet = CharSet.Unicode)] private static extern int SetCurrentProcessExplicitAppUserModelID(string id);
 }

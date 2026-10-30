@@ -13,6 +13,8 @@ public partial class MainWindow
     private bool _hotkeyOpened;
     // Opened by the expand hotkey and not entered by the pointer yet.
     private bool _hotkeyPinned;
+    // Opened by a click on the island and held open until clicked again or closed with Escape.
+    private bool _clickPinned;
 
     // Hidden by the hide hotkey; part of IsSuppressed, so it combines with the full-screen rule the same way.
     internal bool HiddenByUser => _app.UserHidden && !_hotkeyOpened;
@@ -50,6 +52,7 @@ public partial class MainWindow
     internal void HotkeyPanelCollapsed()
     {
         _hotkeyPinned = false;
+        _clickPinned = false;
         if (!_hotkeyOpened) return;
         _hotkeyOpened = false;
         if (!_app.UserHidden) return;

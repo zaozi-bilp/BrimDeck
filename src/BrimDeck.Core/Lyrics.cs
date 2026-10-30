@@ -12,16 +12,20 @@ public sealed record Lyrics(IReadOnlyList<LyricLine> Lines, bool Synced, string 
     // Apple Music's lines are shown this many seconds before they are sung, so that a line can be read as it starts.
     public const double AppleLead = 0.2;
     public bool QqPreview { get; init; }
+    // The matched recording's length, when the provider supplied it. Kugou reports no duration through Windows media
+    // controls, so a catalog match gives the compact progress and the estimated position a length to clamp to.
+    public TimeSpan? Duration { get; init; }
     public bool CanSynchronize(MediaTrack track) => Synced && track.HasTimeline;
-    public (string Previous, string Current, string Next) At(MediaTrack track, DateTimeOffset now)
+    // offset: seconds added to the song position, the user's lyric offset. A positive value shows lines earlier.
+    public (string Previous, string Current, string Next) At(MediaTrack track, DateTimeOffset now, double offset = 0)
     {
         if (!CanSynchronize(track)) return ("", "", "");
-        if (!QqPreview || !track.IsQqMusic) return At(track.Position(now).TotalSeconds + (track.IsAppleMusic ? AppleLead : 0));
+        if (!QqPreview || !track.IsQqMusic) return At(track.Position(now).TotalSeconds + (track.IsAppleMusic ? AppleLead : 0) + offset);
         // A preview can start at zero or inside the song. QQ's actual current line and
         // full-song karaoke timestamp locate it without guessing from the clip metadata.
         string text = track.CurrentLyric ?? "";
         string key = NormalizeLine(text);
-        if (key.Length == 0) return ("", text.Length > 0 ? text : track.CurrentLyric is null ? "" : "♪", "");
+        if (key.Length == 0) return ("", text, "");
         var matches = Lines.Select((line, index) => (Line: line, Index: index))
             .Where(row => NormalizeLine(row.Line.Text) == key).ToArray();
         if (matches.Length == 1) return At(matches[0].Line.Seconds);
@@ -34,18 +38,30 @@ public sealed record Lyrics(IReadOnlyList<LyricLine> Lines, bool Synced, string 
         return ("", text, "");
     }
     private static string NormalizeLine(string text) => string.Concat(text.Where(char.IsLetterOrDigit)).ToUpperInvariant();
+    // How much of the current line has been sung: 0 before its timestamp, 1 at the next line's. Unsynced lyrics have no
+    // progress. The last line runs to its timestamp plus a few seconds, since LRC gives no explicit end.
+    public double Progress(double seconds)
+    {
+        if (!Synced || Lines.Count == 0 || !double.IsFinite(seconds)) return 0;
+        int index = -1;
+        for (int i = 0; i < Lines.Count && Lines[i].Seconds <= seconds; i++) index = i;
+        if (index < 0) return 0;
+        double start = Lines[index].Seconds;
+        double end = index + 1 < Lines.Count ? Lines[index + 1].Seconds : start + 4;
+        return end <= start ? 1 : Math.Clamp((seconds - start) / (end - start), 0, 1);
+    }
     public (string Previous, string Current, string Next) At(double seconds)
     {
-        if (Lines.Count == 0) return ("", Instrumental ? "♪" : "", "");
+        if (Lines.Count == 0) return ("", "", "");
         if (!Synced) return ("", "", "");
         int index = -1;
         for (int i = 0; i < Lines.Count && Lines[i].Seconds <= seconds; i++) index = i;
-        if (index < 0) return ("", "♪", Lines[0].Text);
+        if (index < 0) return ("", "", Lines[0].Text);
         var current = Lines[index];
         var next = index + 1 < Lines.Count ? Lines[index + 1] : null;
         // LRC timestamps start a line; they do not specify how long it is sung.
         // Only an explicit blank line marks a gap before the next timestamp.
-        string text = string.IsNullOrWhiteSpace(current.Text) ? "♪" : current.Text;
+        string text = string.IsNullOrWhiteSpace(current.Text) ? "" : current.Text;
         return (index > 0 ? Lines[index - 1].Text : "", text, next?.Text ?? "");
     }
     public static Lyrics Parse(string? lrc, string? plain, double duration, string source, bool instrumental = false)
@@ -116,7 +132,10 @@ public sealed partial class LyricsService : IDisposable
             }
             else
             {
-                if (track.SongId.StartsWith("netease:", StringComparison.Ordinal))
+                // Kugou's own lyric service has no usable search result; a public catalog (QQ Music) has the exact
+                // recording for the Chinese songs Kugou usually plays. LRCLIB and NetEase remain the fallbacks.
+                if (track.IsKugouMusic) lyrics = await FindQqCatalog(track, token);
+                if (lyrics.Lines.Count == 0 && !lyrics.Instrumental && track.SongId.StartsWith("netease:", StringComparison.Ordinal))
                     lyrics = await FindNeteaseId(track.SongId[8..], track.Duration.TotalSeconds, token);
                 if (lyrics.Lines.Count == 0 && !lyrics.Instrumental) lyrics = await FindLrclib(track, token);
                 if (lyrics.Lines.Count == 0 && !lyrics.Instrumental) lyrics = await FindNetease(track, token);
@@ -126,7 +145,7 @@ public sealed partial class LyricsService : IDisposable
             if (lyrics.Lines.Count > 0 || lyrics.Instrumental)
             {
                 _cache[cacheKey] = lyrics; _order.Remove(cacheKey); _order.AddLast(cacheKey);
-                while (_order.Count > 80) { _cache.Remove(_order.First!.Value); _order.RemoveFirst(); }
+                while (_order.Count > 48) { _cache.Remove(_order.First!.Value); _order.RemoveFirst(); }
             }
             return lyrics;
         }

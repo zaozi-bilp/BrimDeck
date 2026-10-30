@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Threading;
 
@@ -60,6 +61,29 @@ public partial class MainWindow
         if (_shadowSettle is null) return;
         ShadowHost.CacheMode = null; _shadowSettle.Stop(); _shadowSettle.Start();
     }
+
+    // The island's shadow takes the playing cover's color as a soft halo, and returns to the plain black drop shadow when the
+    // song stops or the setting is off. The halo lies on the shadow host's cached picture, so the cache is dropped while the
+    // change runs and taken back once it settles (ShadowChanging).
+    private void UpdateCoverGlow()
+    {
+        if (IslandShadow.Effect is not DropShadowEffect shadow) return;
+        bool glow = Settings.CoverGlow && _coverAccent is { } accent && _mediaTrack is { State: not BrimDeck.Core.MediaState.Stopped };
+        Color color = glow ? GlowTint(_coverAccent ?? Colors.Black) : Colors.Black;
+        double opacity = glow ? .42 : .28, depth = glow ? 0 : 4, blur = glow ? 22 : 14;
+        if (shadow.Color == color && Math.Abs(shadow.Opacity - opacity) < .01 &&
+            Math.Abs(shadow.ShadowDepth - depth) < .01 && Math.Abs(shadow.BlurRadius - blur) < .01) return;
+        var length = new Duration(TimeSpan.FromMilliseconds(Settings.Animations && SystemParameters.ClientAreaAnimation ? 650 : 0));
+        shadow.BeginAnimation(DropShadowEffect.ColorProperty, new ColorAnimation(color, length) { FillBehavior = FillBehavior.HoldEnd });
+        shadow.BeginAnimation(DropShadowEffect.OpacityProperty, new DoubleAnimation(opacity, length) { FillBehavior = FillBehavior.HoldEnd });
+        shadow.BeginAnimation(DropShadowEffect.ShadowDepthProperty, new DoubleAnimation(depth, length) { FillBehavior = FillBehavior.HoldEnd });
+        shadow.BeginAnimation(DropShadowEffect.BlurRadiusProperty, new DoubleAnimation(blur, length) { FillBehavior = FillBehavior.HoldEnd });
+        FitShadowCache(VisualTreeHelper.GetDpi(this).DpiScaleX);
+        ShadowChanging();
+    }
+
+    // A cover color softened toward the dark surface: a glow, not a colored outline.
+    private static Color GlowTint(Color color) => Color.FromRgb((byte)(color.R * .72), (byte)(color.G * .72), (byte)(color.B * .72));
 
     // The picture is drawn at the display's scale and reaches past the blur by whole device pixels (ShadowBounds): a picture
     // whose edge fell between pixels was resampled when drawn, and differed from the shadow drawn directly by up to 44 levels

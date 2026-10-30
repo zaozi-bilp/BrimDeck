@@ -82,7 +82,7 @@ internal static class QqLyricsTests
         check("QQ paused preview does not drift as wall time advances", repeated.At(chorus, DateTimeOffset.UtcNow.AddMinutes(5)) == ("第二段之前", "重复句", "第二段之后"));
         check("QQ backward seek follows the new native lyric cue", repeated.At(chorus with { CurrentLyricStart = TimeSpan.FromSeconds(15) }, DateTimeOffset.UtcNow) == ("第一段之前", "重复句", "第一段之后"));
         check("Ambiguous preview lyrics never guess a chorus from the local clip clock", repeated.At(chorus with { CurrentLyricStart = null }, DateTimeOffset.UtcNow) == ("", "重复句", ""));
-        check("QQ preview gaps and disconnects clear old neighboring lines", repeated.At(chorus with { CurrentLyric = "", CurrentLyricStart = null }, DateTimeOffset.UtcNow) == ("", "♪", "") &&
+        check("QQ preview gaps and disconnects clear old neighboring lines", repeated.At(chorus with { CurrentLyric = "", CurrentLyricStart = null }, DateTimeOffset.UtcNow) == ("", "", "") &&
             repeated.At(chorus with { CurrentLyric = null, CurrentLyricStart = null }, DateTimeOffset.UtcNow) == ("", "", ""));
 
         foreach (string identity in new[] { "qq:" + Mid, "qqid:1" })

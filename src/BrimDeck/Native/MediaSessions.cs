@@ -60,7 +60,7 @@ internal sealed class MediaSessions : IDisposable
     private readonly Dictionary<string, CoverCache> _covers = new();
     // Downloaded artwork of recent songs, so switching back to one shows its cover at once.
     // Players that publish only a URL (QQ's pipe, Netease) would otherwise download it on every switch.
-    private const int RecentCoverCount = 16;
+    private const int RecentCoverCount = 8;
     private readonly LinkedList<(string Url, byte[] Bytes)> _recentCovers = new();
     private readonly Dictionary<string, Route> _routes = new();
     private readonly MediaSessionHandover _handover = new();
@@ -685,6 +685,7 @@ internal sealed class MediaSessions : IDisposable
         string lower = id.ToLowerInvariant();
         if (lower.Contains("cloudmusic") || lower.Contains("netease")) return "网易云音乐";
         if (lower.Contains("qqmusic")) return "QQ 音乐";
+        if (lower.Contains("kugou")) return "酷狗音乐";
         if (lower.Contains("msedge")) return "Microsoft Edge";
         if (lower.Contains("chrome")) return "Google Chrome";
         if (lower.Contains("spotify")) return "Spotify";

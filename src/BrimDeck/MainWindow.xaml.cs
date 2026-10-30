@@ -15,6 +15,8 @@ namespace BrimDeck;
 public partial class MainWindow : Window
 {
     private readonly App _app;
+    // Split mode's two islands come apart and go back together by sliding the whole stage; the retiring island fades out.
+    private readonly TranslateTransform _splitSlide = new();
     // Hover timing runs on PromptTimer rather than DispatcherTimer; see PromptTimer for why.
     private readonly PromptTimer _hover, _leave, _pointerTrack, _pageSwitchHold;
     private readonly DispatcherTimer _refresh = new() { Interval = TimeSpan.FromSeconds(60) };
@@ -35,6 +37,9 @@ public partial class MainWindow : Window
     private bool _retiring;
     // The monitor this panel sits on; App assigns it. Without one, or while it is not connected, the primary monitor.
     internal DisplayInfo? Display { get; set; }
+    // Split mode's two islands: 0 is the left/small one and 1 the right/large one. In single mode every deck is lane 0 and
+    // the lane's settings are ignored.
+    internal int Lane { get; }
     private IntPtr MonitorHandle => Display is { } display && WindowsHost.MonitorScreen(display.Handle) is not null ? display.Handle : WindowsHost.PrimaryMonitor();
     // Animated in place so the indicator style can fade its surface in and out instead of switching brushes.
     private readonly SolidColorBrush _surface = new(Colors.Black);
@@ -56,6 +61,9 @@ public partial class MainWindow : Window
     private VirtualDesktopPresence? _virtualDesktops;
     private EscapeDismissal? _escapeDismissal;
     private bool _expanded, _refreshing, _preview, _refreshRequested, _pointerInside;
+    // The second island builds its open page only when it is first opened, so a split mode left collapsed does not hold a
+    // second usage or monitor page in memory.
+    private bool _pagesReady;
     // A preview from the settings window either holds the panel open or keeps it collapsed while a collapsed size is adjusted.
     private bool _previewExpanded;
     private Rect? _popupReturnArea;
@@ -73,15 +81,17 @@ public partial class MainWindow : Window
     private CompactAlertInfo? _alert;
     private DeckSettings Settings => _app.Settings;
     public bool IsExpanded => _expanded;
-    public bool IsSuppressed => !_preview && (Settings.Behavior(_context, _host.App.Name, _host.App.Path) == WindowBehavior.Hide || HiddenByUser);
+    public bool IsSuppressed => !_preview && (Settings.Behavior(_context, _host.App.Name, _host.App.Path) == WindowBehavior.Hide || HiddenByUser || LaneHidden);
+    // The second island has nothing to draw when a window rule turns the panel into the line: the first island alone shows it.
+    private bool LaneHidden => Lane > 0 && Settings.SplitShown && EffectiveStyle == CompactStyle.Line;
     public IReadOnlyList<ProviderSnapshot> Snapshots { get; private set; } = [];
     public string? LastRefreshError { get; private set; }
 
     private sealed record CompactAlertInfo(AppEntry Entry, string Name, string Label, double Used, DateTimeOffset? ResetAt);
 
-    public MainWindow(App app, MainWindow? lead = null)
+    public MainWindow(App app, MainWindow? lead = null, int lane = 0)
     {
-        _app = app; _lead = lead;
+        _app = app; _lead = lead; Lane = lane;
         _host = new WindowsHost(() => MonitorHandle, () => new WindowInteropHelper(this).Handle, IslandStrip);
         Rect? IslandStrip()
         {
@@ -114,6 +124,7 @@ public partial class MainWindow : Window
             if (_expanded && !_preview) PointerChanged(_pointerInside);
         }) { Interval = TimeSpan.FromSeconds(1) };
         InitializeComponent();
+        Stage.RenderTransform = _splitSlide;
         // Out of sight until the boot (or, without animations, until it has its place): the window shows before it is placed.
         HoverZone.Opacity = 0;
         _handover = new PageHandover(LeavingContent);
@@ -241,6 +252,7 @@ public partial class MainWindow : Window
         if (!Settings.QuotaAlerts && _alert is not null) ClearAlert();
         ApplySyncSchedule();
         ApplyMusicSettings();
+        UpdateCoverGlow();
         ApplyScale();
         var (bounds, work, scale) = WindowsHost.MonitorScreen(MonitorHandle) ?? WindowsHost.PrimaryScreen();
         UpdateCollapsedGeometry(bounds, work, scale);
@@ -250,14 +262,14 @@ public partial class MainWindow : Window
         _pageWidth = Fit(DeckPages.Size(Settings, CurrentPage).Width); _usageWidth = Fit(DeckPages.Size(Settings, DeckPage.Usage).Width);
         // The widest shown page as it fits this monitor, measured as _pageWidth is (SetExpanded centres on it). A drag resizes
         // only the page that shows, which SetExpanded takes from _pageWidth; this is set again when the size is saved (ApplySettings).
-        _widestPage = Fit(DeckPages.Largest(Settings).Width);
+        _widestPage = Fit(LargestPage().Width);
         // The layered HWND keeps the largest size anything it shows can take, so that it is not resized or moved while the panel
         // is used: Windows shows a layered window's last picture at its new size and place before WPF draws it again, so every
         // resize flashed the panel cut off or shifted for a frame (it did on each press and release of a resize drag). That is
         // every page at the largest size a drag can give it, and the collapsed surface at the widest any form can be on this
         // monitor, with room on either side for the resize grips just outside them (ResizeGrips). The notch and the capsule may be
         // as wide as the monitor, so the window is as wide as the monitor too. Only Island animates.
-        var largest = DeckPages.Largest(Settings);
+        var largest = LargestPage();
         largest = (Math.Max(largest.Width, PageMaxWidth), Math.Max(largest.Height, DeckPages.MaxHeight));
         double widestSurface = Enum.GetValues<CompactStyle>().Max(style => CollapsedGeometry.WidthRange(style, MonitorBoundsDip, WorkDip, _scale).Max);
         Width = Math.Min(MonitorBoundsDip.Width, Math.Max(Math.Max(Fit(largest.Width) * _scale, widestSurface), Collapsed.Surface.Width) + 2 * ResizeGrips.Room);
@@ -294,7 +306,16 @@ public partial class MainWindow : Window
             SetExpanded(_expanded, !animatePage || !wasVisible);
         }
         UpdatePointerTracking();
+        if (Lane == 0 || _pagesReady || _expanded) { RenderUsage(); _pagesReady = true; }
+    }
+    // The second island's pages are built on its first opening.
+    private void EnsurePages()
+    {
+        if (_pagesReady) return;
+        _pagesReady = true;
         RenderUsage();
+        if (IsMusicPage) RenderMusic();
+        if (IsMonitorPage) RenderMonitor();
     }
     // Windows keeps a layered window's last picture while it is hidden and puts it on screen the moment the window is shown,
     // before WPF draws again. Hidden straight away, the panel came back showing the frame it was hidden on: after the expand
@@ -351,8 +372,26 @@ public partial class MainWindow : Window
         WorkDip = new DipRect((work.Left - bounds.Left) / scale, (work.Top - bounds.Top) / scale, work.Width / scale, work.Height / scale);
         Collapsed = ShapeFor(EffectiveStyle);
     }
-    private CollapsedShape ShapeFor(CompactStyle style) => CollapsedGeometry.Resolve(Settings, style, MonitorBoundsDip, WorkDip, _pixelsPerDip,
-        Settings.CompactAutoWidth(style) && !double.IsNaN(_compactWanted) ? _compactWanted : null, _compactRequired, _scale);
+    private CollapsedShape ShapeFor(CompactStyle style)
+    {
+        if (style != CompactStyle.Line && SplitLane is { } lane)
+        {
+            bool capsule = style == CompactStyle.Capsule;
+            double width = lane.Width > 0 ? lane.Width : capsule ? CollapsedLimits.CapsuleWidthDefault : CollapsedLimits.NotchWidthDefault;
+            double height = lane.Height > 0 ? lane.Height : capsule ? CollapsedLimits.CapsuleHeightDefault : CollapsedLimits.NotchHeightDefault;
+            double top = lane.Top ?? (capsule ? Settings.CapsuleTop : 0);
+            var other = Settings.IslandFor(1 - Lane);
+            double otherWidth = other is { Width: > 0 } value ? value.Width : capsule ? CollapsedLimits.CapsuleWidthDefault : CollapsedLimits.NotchWidthDefault;
+            // The two surfaces are one centred group: the small lane sits to the left of the large one by half their widths
+            // and the gap.
+            double group = otherWidth + Settings.SplitGap;
+            double offset = lane.OffsetX + (Lane == 0 ? -group / 2 : group / 2);
+            return CollapsedGeometry.Resolve(style, MonitorBoundsDip, WorkDip, width, height, top, offset, _pixelsPerDip,
+                contentWanted: null, contentRequired: _compactRequired, panelScale: _scale);
+        }
+        return CollapsedGeometry.Resolve(Settings, style, MonitorBoundsDip, WorkDip, _pixelsPerDip,
+            Settings.CompactAutoWidth(style) && !double.IsNaN(_compactWanted) ? _compactWanted : null, _compactRequired, _scale);
+    }
     // The width the collapsed content asks for (see CollapsedGeometry); NaN until the row is first built, which keeps the saved width.
     private double _compactWanted = double.NaN;
     // The width of what the collapsed content must show (CompactMusicLayout.RequiredWidth), which the surface always keeps.
@@ -408,7 +447,18 @@ public partial class MainWindow : Window
     // The usage page's height in the current window, while the music page is shown too.
     private double UsagePageHeight => PageHeight(Settings.Height, PanelFor(Settings.Height));
     // pageHeight is unscaled; the panel's place depends on its height as drawn.
-    private PanelPlacement PanelFor(double pageHeight) => CollapsedGeometry.Panel(Collapsed, WorkDip, pageHeight * _scale, PanelBottom);
+    private PanelPlacement PanelFor(double pageHeight)
+    {
+        var panel = CollapsedGeometry.Panel(Collapsed, WorkDip, pageHeight * _scale, PanelBottom);
+        // In split mode the panel starts below both islands, so opening one never covers the other. A lane pulled near
+        // the bottom of the work area keeps the normal placement instead: there is no room below it.
+        if (SplitLane is not null)
+        {
+            double below = Collapsed.Surface.Bottom + 6;
+            if (below < WorkDip.Bottom - 80) panel = panel with { Top = below, HeaderExtra = 0 };
+        }
+        return panel;
+    }
     // The lowest bottom edge of a panel below a lowered capsule: the work area's bottom, even when that is the monitor's bottom
     // (no taskbar there), so a capsule pulled all the way down is still covered by its panel. The window may then end at the
     // monitor's bottom with no room below the panel; SetExpanded does not reserve any for a panel that starts below the top.
@@ -481,10 +531,68 @@ public partial class MainWindow : Window
     {
         Snapshots = snapshots; _updatedAt = DateTimeOffset.Now;
         DetectThresholds();
-        RenderCompact(); RenderUsage();
+        RenderCompact();
+        if (Lane == 0 || _pagesReady) RenderUsage();
     }
 
     // The compact island shows one ring per enabled application: the highest used share among its quotas.
+    // The two islands separate: this lane starts where a single island would sit and slides to its own place. The second
+    // island fades in as it slides out, so turning split mode on reads as one move rather than two windows appearing.
+    internal void BeginSeparate(bool fadeIn = false)
+    {
+        if (EffectiveStyle == CompactStyle.Line || !Settings.SplitShown) return;
+        var lane = Lane == 0 ? Settings.Island1 : Settings.Island2;
+        Slide(LaneX(lane, split: false) - Collapsed.Surface.X, fadeIn: fadeIn);
+    }
+    // The islands go back together: this lane slides from its split place to the single island's centre; the retiring second
+    // island does the same and fades out.
+    internal void BeginMerge(bool fadeOut = false)
+    {
+        if (EffectiveStyle == CompactStyle.Line || Settings.SplitShown) return;
+        double oldX = Lane == 0 ? LaneX(Settings.Island1, split: true) : Collapsed.Surface.X;
+        double newX = Lane == 0 ? Collapsed.Surface.X : ShapeFor(EffectiveStyle).Surface.X;
+        Slide(oldX - newX, fadeOut: fadeOut);
+    }
+    // Where a lane's collapsed surface lies with its own offset, either in its split place (split) or at the centre (not).
+    private double LaneX(IslandSettings lane, bool split)
+    {
+        bool capsule = EffectiveStyle == CompactStyle.Capsule;
+        double width = lane.Width > 0 ? lane.Width : capsule ? CollapsedLimits.CapsuleWidthDefault : CollapsedLimits.NotchWidthDefault;
+        double height = lane.Height > 0 ? lane.Height : capsule ? CollapsedLimits.CapsuleHeightDefault : CollapsedLimits.NotchHeightDefault;
+        double top = lane.Top ?? (capsule ? Settings.CapsuleTop : 0);
+        double offset = lane.OffsetX;
+        if (split)
+        {
+            var other = Lane == 0 ? Settings.Island2 : Settings.Island1;
+            double otherWidth = other.Width > 0 ? other.Width : capsule ? CollapsedLimits.CapsuleWidthDefault : CollapsedLimits.NotchWidthDefault;
+            offset += (Lane == 0 ? -1 : 1) * (otherWidth + Settings.SplitGap) / 2;
+        }
+        return CollapsedGeometry.Resolve(EffectiveStyle, MonitorBoundsDip, WorkDip, width, height, top, offset, _pixelsPerDip,
+            contentWanted: null, contentRequired: _compactRequired, panelScale: _scale).Surface.X;
+    }
+    private void Slide(double delta, bool fadeIn = false, bool fadeOut = false)
+    {
+        bool animate = Settings.Animations && SystemParameters.ClientAreaAnimation;
+        if (Math.Abs(delta) > .5 && animate)
+        {
+            _splitSlide.X = delta;
+            var move = new DoubleAnimation(0, TimeSpan.FromMilliseconds(300)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }, FillBehavior = FillBehavior.Stop };
+            _splitSlide.BeginAnimation(TranslateTransform.XProperty, move);
+        }
+        else _splitSlide.X = 0;
+        if (fadeIn && animate)
+        {
+            Island.Opacity = 1;
+            Island.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(300)));
+        }
+        if (fadeOut)
+        {
+            if (!animate) { Island.Opacity = 0; return; }
+            var fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(300)) { FillBehavior = FillBehavior.Stop };
+            fade.Completed += (_, _) => Island.Opacity = 0;
+            Island.BeginAnimation(OpacityProperty, fade);
+        }
+    }
     internal void RenderCompact()
     {
         var fade = RowFadeStart();
@@ -538,7 +646,7 @@ public partial class MainWindow : Window
     // appear later when the panel shows again.
     private void ShowAlert(CompactAlertInfo alert)
     {
-        if (IsSuppressed) return;
+        if (IsSuppressed || !ShowsPart(CompactPart.Rings)) return;
         _alert = alert; _alertTimer.Stop(); _alertTimer.Start();
         RenderCompact();
         if (!_expanded && !IsSuppressed) SetExpanded(false);
@@ -570,14 +678,16 @@ public partial class MainWindow : Window
     {
         if (expanded && IsSuppressed || _poweringOff) return;
         if (expanded && !_expanded) EndBoot();
-        // Only the panel under the pointer is open; the others close at once and give up the Escape key.
-        if (expanded && !_preview)
+        // Only the panel under the pointer is open; the others close at once and give up the Escape key. In split mode the
+        // two islands are independent, so opening one leaves the other open.
+        if (expanded && !_preview && !Settings.SplitIslands)
             foreach (var other in _app.Decks.Where(deck => deck != this && deck._expanded && !deck._preview).ToList()) other.SetExpanded(false);
         if (expanded && !_expanded && !_preview) ApplyDefaultMusicPage();
         // A hand-over cut short by closing the panel leaves nothing behind for the next opening.
         if (expanded && !_expanded) _handover.Drop();
         bool wasExpanded = _expanded;
         _expanded = expanded;
+        if (expanded) EnsurePages();
         _escapeDismissal?.SetEnabled(expanded && !_preview);
         if (!expanded) { CloseSourceMenu(); _popupReturnArea = null; _leave.Stop(); _pageSwitchHold.Stop(); _detailPopup?.Close(); }
         if (wasExpanded && !expanded) { HotkeyPanelCollapsed(); ReplayCompactTitle(); _app.RequestTrim(); }
@@ -772,6 +882,30 @@ public partial class MainWindow : Window
     { if (_expanded) PointerChanged(true); }
     private void Island_MouseLeave(object sender, MouseEventArgs e)
     { if (_expanded) PointerChanged(false); }
+    // A click opens the island and keeps it open (a second click closes it). In split mode the other island can then be
+    // opened too, and both panels stay.
+    private void Island_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (IsSuppressed || e.ChangedButton != MouseButton.Left) return;
+        if (!_expanded)
+        {
+            _clickPinned = true;
+            OpenFromHotkey();
+            _clickPinned = true;
+            e.Handled = true;
+        }
+        else if (_clickPinned)
+        {
+            _clickPinned = false;
+            SetExpanded(false, keyboard: true);
+            e.Handled = true;
+        }
+        else
+        {
+            _clickPinned = true;
+            e.Handled = true;
+        }
+    }
     internal void TrackPointer()
     {
         if (_preview && _previewExpanded || IsSuppressed || !IsVisible || PresentationSource.FromVisual(Stage) is null || Resizing || BootHoldsPointer) return;
@@ -795,6 +929,8 @@ public partial class MainWindow : Window
         }
         if (_expanded)
         {
+            // A panel opened by a click stays open wherever the pointer goes, until it is clicked again or closed.
+            if (_clickPinned) { _pointerInside = true; return; }
             // Kept current so that collapsing with the cursor still on the surface does not count as a new entry.
             _cursorInCompact = inCompact;
             // A jump straight out of the panel can leave without any mouse message reaching the window.
@@ -887,7 +1023,7 @@ public partial class MainWindow : Window
         finally
         {
             _refreshing = false; RestartSyncCycle(); _app.RequestTrim();
-            foreach (var deck in _app.Decks) deck.RenderUsage();
+            foreach (var deck in _app.Decks) if (deck.Lane == 0 || deck._pagesReady) deck.RenderUsage();
             if (_refreshRequested)
             {
                 _refreshRequested = false; _ = RefreshAsync();

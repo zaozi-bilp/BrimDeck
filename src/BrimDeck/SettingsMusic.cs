@@ -30,7 +30,7 @@ public sealed partial class SettingsWindow
     private void ShowStyleOptions(CompactStyle style, CompactStyle? previous)
     {
         if (_styleOptions is not { } host) return;
-        var incoming = Collect(() => { StyleOptions(style); CollapsedSizeOptions(style); });
+        var incoming = Collect(() => { StyleOptions(style); if (!S.SplitIslands) CollapsedSizeOptions(style); });
         var outgoing = host.Children.OfType<FrameworkElement>().LastOrDefault();
         double width = host.ActualWidth;
         if (outgoing is null || previous is not { } from || from == style || width <= 0 || !SystemParameters.ClientAreaAnimation)
@@ -55,13 +55,76 @@ public sealed partial class SettingsWindow
             return;
         }
         // The rows are in the order the collapsed row shows the parts, left to right; only the cover keeps its place at the left.
-        var rows = new StackPanel();
-        _partOptions.Clear();
-        foreach (var part in S.CompactOrder(style))
-            rows.Children.Add(part switch { CompactPart.Equalizer => EqualizerRow(style, rows), CompactPart.Clock => ClockRow(style, rows), _ => PartRow(style, part, rows) });
-        UpdateDividers(rows);
-        Group(rows);
+        if (!S.SplitIslands)
+        {
+            var rows = new StackPanel();
+            _partOptions.Clear();
+            foreach (var part in S.CompactOrder(style))
+                rows.Children.Add(part switch { CompactPart.Equalizer => EqualizerRow(style, rows), CompactPart.Clock => ClockRow(style, rows), _ => PartRow(style, part, rows) });
+            UpdateDividers(rows);
+            Group(rows);
+        }
+        SplitOptions(style);
     }
+
+    // Two islands: one small and one large, each with its own content, pages and size. Either opens its own panel.
+    private void SplitOptions(CompactStyle style)
+    {
+        SectionTitle(Loc.T("双岛", "Two islands"));
+        Group(Toggle(Loc.T("分成两个岛（一大一小）", "Split into two islands (one large, one small)"), S.SplitIslands,
+            v => { Change(s => s.SplitIslands = v); ShowPage(_page); }, help: Loc.T("开启后，收起的刘海或胶囊分成左右两个岛：下面分别选择每个岛的内容和展开页面，点任意一个岛可独立展开。双岛会多一个窗口，内存占用略高；不需要时关闭即可。",
+                "When on, the collapsed notch or capsule becomes two islands: choose each island's content and pages below, and either opens its own panel. A second island costs a second window and a little more memory; off keeps the single island.")));
+        if (!S.SplitIslands) return;
+        var lanes = new StackPanel();
+        lanes.Children.Add(LaneEditor(0, Loc.T("岛 1（左/小）", "Island 1 (left/small)"), S.Island1));
+        lanes.Children.Add(new Border { Height = 1, Background = UI.Brush(Divider) });
+        lanes.Children.Add(LaneEditor(1, Loc.T("岛 2（右/大）", "Island 2 (right/large)"), S.Island2));
+        lanes.Children.Add(Lighter(SliderRow(Loc.T("岛间距", "Gap"), S.SplitGap, 0, 40, 1, "DIP", v => Change(s => s.SplitGap = (int)v)), Loc.T("岛间距", "Gap")));
+        Group(lanes);
+    }
+
+    private FrameworkElement LaneEditor(int lane, string title, IslandSettings settings)
+    {
+        var panel = new StackPanel();
+        var head = TextLine(title, 13, TextPrimary, FontWeights.SemiBold); head.Margin = new Thickness(0, 8, 0, 6); panel.Children.Add(head);
+        void Edit(Action<IslandSettings> edit) => Change(s => edit(lane == 0 ? s.Island1 : s.Island2));
+        var contentTitle = TextLine(Loc.T("显示内容", "Content"), 11.5, TextSecondary); contentTitle.Margin = new Thickness(0, 0, 0, 5); panel.Children.Add(contentTitle);
+        var parts = new WrapPanel();
+        foreach (var part in CompactParts.Default)
+        {
+            var box = new CheckBox { Content = PartName(part), IsChecked = settings.Parts.Contains(part), Margin = new Thickness(0, 0, 16, 6) };
+            AutomationProperties.SetName(box, title + " " + PartName(part));
+            box.Checked += (_, _) => Edit(l => { if (!l.Parts.Contains(part)) l.Parts.Add(part); l.Parts = [.. CompactParts.Default.Where(l.Parts.Contains)]; });
+            box.Unchecked += (_, _) => Edit(l => { if (l.Parts.Count > 1) l.Parts.Remove(part); });
+            parts.Children.Add(box);
+        }
+        panel.Children.Add(parts);
+        var pagesTitle = TextLine(Loc.T("展开后的页面", "Pages when open"), 11.5, TextSecondary); pagesTitle.Margin = new Thickness(0, 2, 0, 5); panel.Children.Add(pagesTitle);
+        var pages = new WrapPanel();
+        foreach (var page in DeckPages.Order)
+        {
+            var box = new CheckBox { Content = PageName(page), IsChecked = settings.Pages.Contains(page), Margin = new Thickness(0, 0, 16, 6) };
+            AutomationProperties.SetName(box, title + " " + PageName(page));
+            box.Checked += (_, _) => Edit(l => { if (!l.Pages.Contains(page)) l.Pages.Add(page); l.Pages = [.. DeckPages.Order.Where(l.Pages.Contains)]; });
+            box.Unchecked += (_, _) => Edit(l => { if (l.Pages.Count > 1) l.Pages.Remove(page); l.Pages = [.. DeckPages.Order.Where(l.Pages.Contains)]; });
+            pages.Children.Add(box);
+        }
+        panel.Children.Add(pages);
+        panel.Children.Add(Lighter(SliderRow(Loc.T("宽度", "Width"), settings.Width, 80, 800, 2, "DIP", v => Edit(l => l.Width = v)), Loc.T("宽度", "Width")));
+        panel.Children.Add(Lighter(SliderRow(Loc.T("高度", "Height"), settings.Height, 24, 64, 1, "DIP", v => Edit(l => l.Height = v)), Loc.T("高度", "Height")));
+        return panel;
+    }
+
+    private static string PartName(CompactPart part) => part switch
+    {
+        CompactPart.Rings => Loc.T("配额环", "Quota rings"), CompactPart.Music => Loc.T("音乐", "Music"),
+        CompactPart.Monitor => Loc.T("系统读数", "Readings"), CompactPart.Equalizer => Loc.T("律动条", "Equalizer"),
+        CompactPart.Clock => Loc.T("时钟", "Clock"), _ => part.ToString()
+    };
+    private static string PageName(DeckPage page) => page switch
+    {
+        DeckPage.Usage => Loc.T("用量", "Usage"), DeckPage.Music => Loc.T("音乐", "Music"), DeckPage.Monitor => Loc.T("监控", "Monitor"), _ => page.ToString()
+    };
 
     private const double PartRowHeight = 44, PartHandleWidth = 40;
     // The parts whose options are open (the equalizer, the clock), kept while the page is rebuilt or the collapsed style changes.
@@ -211,12 +274,22 @@ public sealed partial class SettingsWindow
     {
         SectionTitle(Loc.T("收起时", "When collapsed"));
         Group(MusicChoice(Loc.T("中间文字", "Middle text"), S.MusicText, new[] { (CompactMusicText.None, Loc.T("无", "None")), (CompactMusicText.Title, Loc.T("歌名", "Title")), (CompactMusicText.Lyrics, Loc.T("歌词", "Lyrics")) }, v => Change(s => s.MusicText = v)),
-            Toggle(Loc.T("切歌时短暂显示歌名", "Briefly show the title on a track change"), S.MusicTrackNotice, v => Change(s => s.MusicTrackNotice = v)));
+            Toggle(Loc.T("切歌时短暂显示歌名", "Briefly show the title on a track change"), S.MusicTrackNotice, v => Change(s => s.MusicTrackNotice = v)),
+            Toggle(Loc.T("封面氛围光", "Cover glow"), S.CoverGlow, v => Change(s => s.CoverGlow = v),
+                help: Loc.T("播放音乐时，收起岛的阴影取封面主色，形成柔和光晕；暂停或停止后恢复普通阴影。",
+                    "While music plays, the collapsed island's shadow takes the cover's main color as a soft halo; it returns to the plain shadow when the song pauses or stops.")));
         SectionTitle(Loc.T("展开时", "When expanded"));
         var bars = SliderRow(Loc.T("律动条长度", "Equalizer length"), S.MusicEqualizerBars, CompactMusicLayout.MinimumBars, CompactMusicLayout.MaximumBars, 1, Loc.T("根", "bars"),
             v => Change(s => s.MusicEqualizerBars = (int)v));
         bars.IsEnabled = S.MusicPage;
-        Group(Toggle(Loc.T("显示歌词", "Show lyrics"), S.LyricsEnabled, v => Change(s => s.LyricsEnabled = v), S.MusicPage), bars);
+        var offset = SliderRow(Loc.T("歌词偏移", "Lyric offset"), S.LyricOffsetMs, -3000, 3000, 100, Loc.T("毫秒", "ms"),
+            v => Change(s => s.LyricOffsetMs = (int)Math.Round(v)),
+            Loc.T("正数让歌词提前，负数延后，最多 3 秒。酷狗进度较粗或个别歌曲不同步时用来微调。",
+                "Positive values show lyric lines earlier and negative values later, up to 3 seconds. Useful when Kugou's progress is coarse or a song is out of step."));
+        offset.IsEnabled = S.MusicPage;
+        var progress = Toggle(Loc.T("歌词进度线", "Lyric progress line"), S.LyricProgress, v => Change(s => s.LyricProgress = v), S.MusicPage,
+            help: Loc.T("在当前歌词下方显示一条细线，随这一句的演唱进度填满。", "A thin line under the current lyric fills as that line is sung."));
+        Group(Toggle(Loc.T("显示歌词", "Show lyrics"), S.LyricsEnabled, v => Change(s => s.LyricsEnabled = v), S.MusicPage), bars, offset, progress);
     }
     // Operations only one player supports, grouped under that player's name.
     private void Players()

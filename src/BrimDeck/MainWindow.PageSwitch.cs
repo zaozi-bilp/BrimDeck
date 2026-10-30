@@ -34,7 +34,7 @@ public partial class MainWindow
     private void OrderPageButtons()
     {
         if (AIUsageButton.Parent is not Panel buttons) return;
-        var order = Settings.PageOrder.Select(PageButton).ToList();
+        var order = LanePages.Select(PageButton).ToList();
         if (!buttons.Children.Cast<UIElement>().SequenceEqual(order))
         {
             buttons.Children.Clear();

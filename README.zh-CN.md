@@ -1,3 +1,6 @@
+> **个人修改版（非官方）。** 基于 [@MoFeng2223](https://github.com/MoFeng2223) 的 BrimDeck [v1.2.3](https://github.com/MoFeng2223/BrimDeck/tree/v1.2.3)，
+> 按个人兴趣修改；功能、差异和版权说明见 [FORK.md](FORK.md)。
+
 <div align="center">
 
 <a href="README.md"><img src="https://img.shields.io/badge/English-3A3A3C?style=for-the-badge" alt="English"></a>

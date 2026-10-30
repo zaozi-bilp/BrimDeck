@@ -36,11 +36,11 @@ internal static class MusicTests
         check("Seeking respects advertised bounds and tick units", (track with { MinSeek = TimeSpan.FromSeconds(30), MaxSeek = TimeSpan.FromSeconds(150) }).SeekTicks(1) == TimeSpan.FromSeconds(150).Ticks);
         var lrc = Lyrics.Parse("[offset:-500]\n[00:02.00][00:06.25]同一行\n[00:20]后一行", null, 210, "test");
         check("LRC multiple timestamps and offsets are parsed", lrc.Synced && lrc.Lines.Count == 3 && lrc.Lines[0].Seconds == 1.5 && lrc.Lines[1].Seconds == 5.75);
-        check("Lyrics show an instrumental introduction before the first timestamp", lrc.At(0).Current == "♪");
+        check("Lyrics show an instrumental introduction before the first timestamp", lrc.At(0).Current == "");
         check("Long lyric lines stay visible until the next timestamp", lrc.At(10.75).Current == "同一行" && lrc.At(12).Current == "同一行" && lrc.At(19.499).Current == "同一行" && lrc.At(19.5).Current == "后一行");
         var gap = Lyrics.Parse("[00:02]长句\n[00:14]\n[00:20]下一句", null, 40, "网易云音乐");
-        check("Only timestamped blank lines start an instrumental gap", gap.At(13.999).Current == "长句" && gap.At(14).Current == "♪" && gap.At(19.999).Current == "♪" && gap.At(20).Current == "下一句");
-        check("Seeking backwards from an explicit gap restores the lyric", gap.At(16).Current == "♪" && gap.At(8).Current == "长句");
+        check("Only timestamped blank lines start an instrumental gap", gap.At(13.999).Current == "长句" && gap.At(14).Current == "" && gap.At(19.999).Current == "" && gap.At(20).Current == "下一句");
+        check("Seeking backwards from an explicit gap restores the lyric", gap.At(16).Current == "" && gap.At(8).Current == "长句");
         check("Timestamped lyrics require a real playback position to synchronize", lrc.CanSynchronize(track) && !lrc.CanSynchronize(track with { PositionKnown = false }) && !lrc.CanSynchronize(track with { End = TimeSpan.Zero }));
         var plain = Lyrics.Parse(null, "甲\n乙", 100, "test");
         check("Plain lyrics retain text without fabricating timestamps", !plain.Synced && plain.Lines.Select(l => l.Text).SequenceEqual(["甲", "乙"]) && plain.Lines.All(l => l.Seconds == 0));

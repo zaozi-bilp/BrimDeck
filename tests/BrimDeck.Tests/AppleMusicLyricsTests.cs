@@ -11,10 +11,10 @@ internal static class AppleMusicLyricsTests
     public static async Task Run(string root, Action<string, bool> check)
     {
         var parsed = LyricsService.ParseAppleTtml(Ttml);
-        check("Apple TTML preserves line timing, word spans and a long gap", parsed.Synced && parsed.At(2).Current == "前一句" && parsed.At(4).Current == "♪" && parsed.At(9).Current == "下一句");
+        check("Apple TTML preserves line timing, word spans and a long gap", parsed.Synced && parsed.At(2).Current == "前一句" && parsed.At(4).Current == "" && parsed.At(9).Current == "下一句");
         var reported = Track with { PositionKnown = true, ReportedPosition = TimeSpan.FromSeconds(1.35) };
         check("Apple Music's lines are shown 0.2 seconds early", parsed.At(reported, DateTimeOffset.UtcNow).Current == "前一句"
-            && parsed.At(reported with { Source = "网易云音乐" }, DateTimeOffset.UtcNow).Current == "♪");
+            && parsed.At(reported with { Source = "网易云音乐" }, DateTimeOffset.UtcNow).Current == "");
         var shortGap = LyricsService.ParseAppleTtml("<tt xmlns='http://www.w3.org/ns/ttml'><body><div><p begin='1' end='3'>前一句</p><p begin='5' end='7'>下一句</p></div></body></tt>");
         check("A gap under five seconds keeps the line", shortGap.At(4).Current == "前一句" && shortGap.At(6).Current == "下一句");
         var plain = LyricsService.ParseAppleTtml("<tt xmlns='http://www.w3.org/ns/ttml'><body><div><p>第一行</p><p>第二行</p></div></body></tt>");

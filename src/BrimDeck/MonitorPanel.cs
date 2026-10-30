@@ -71,7 +71,7 @@ public partial class MainWindow
     // Whether this surface shows the system readings and waits for the first figures of one it does not show yet.
     private bool StripAwaits()
     {
-        if (!Settings.ShowsMonitor(EffectiveStyle)) return false;
+        if (!ShowsPart(CompactPart.Monitor)) return false;
         return _stripAdmission.Awaits(Settings.CompactReadings, _app.Monitor?.Latest, StripSensors);
     }
     // animate: the page is built for the first time, not for a new size, so its power rows come in (PowerOptions.Animate).
@@ -91,7 +91,7 @@ public partial class MainWindow
             // The drives got their first figure: the row is built again with them, and they come in with the row's own entrance
             // while the others slide aside. Until then the row did not show them, so nothing else changes. A temperature or a letter
             // that joins or leaves changes its reading's width, and the row is built again for it.
-            if ((_compactStrip is not null || Settings.ShowsMonitor(EffectiveStyle)) && (hidden != _stripUnavailable || _stripAdmission.Layout != _stripLayout)) { _stripPresence.Arrive(arriving); RenderCompact(); return; }
+            if ((_compactStrip is not null || ShowsPart(CompactPart.Monitor)) && (hidden != _stripUnavailable || _stripAdmission.Layout != _stripLayout)) { _stripPresence.Arrive(arriving); RenderCompact(); return; }
             // A row still waiting for its first figures stops asking for readings once its sensors turn out to be missing.
             if (_compactStrip is null) { UpdateMonitorDemand(); return; }
             _compactStrip?.Update(snapshot, MonitorMotion && Settings.CompactSmoothing != CompactSmoothing.Off, (int)Settings.CompactSmoothing); return;

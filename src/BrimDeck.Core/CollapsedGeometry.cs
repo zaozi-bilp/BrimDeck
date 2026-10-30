@@ -116,6 +116,37 @@ public static class CollapsedGeometry
         }
     }
 
+    // Resolve for one island of split mode, which takes its own width, height, top and offset instead of the style's saved
+    // values. The size limits, content requirements and monitor clamps are the same as Resolve(settings, ...).
+    public static CollapsedShape Resolve(CompactStyle style, DipRect monitor, DipRect work, double width, double height, double top, double offsetX,
+        double pixelsPerDip = 1, double? contentWanted = null, double contentRequired = 0, double panelScale = 1)
+    {
+        double s = ValidScale(panelScale);
+        bool auto = contentWanted is not null;
+        double wanted = contentWanted is { } given && double.IsFinite(given) ? Math.Max(0, given) : 0;
+        double required = Finite(contentRequired);
+        var (screen, area) = Sanitize(monitor, work);
+        if (style == CompactStyle.Capsule)
+        {
+            double h = Math.Min(Value(height, CollapsedLimits.CapsuleHeightMin, CollapsedLimits.CapsuleHeightMax, CollapsedLimits.CapsuleHeightDefault) * s, area.Height);
+            double saved = Value(width, CollapsedLimits.CapsuleWidthMin, CollapsedLimits.CapsuleWidthMax, CollapsedLimits.CapsuleWidthDefault) * s;
+            double fit = Math.Max(CollapsedLimits.CapsuleWidthMin * s, SurfaceWidth(style, h, wanted));
+            double w = Math.Min(Math.Max(auto ? fit : saved, SurfaceWidth(style, h, required)), area.Width);
+            var (topMin, topMax) = TopRange(h, area.Height, double.PositiveInfinity);
+            double y = Math.Clamp(Value(top, CollapsedLimits.CapsuleTopMin, CollapsedLimits.CapsuleTopMax, CollapsedLimits.CapsuleTopDefault), topMin, topMax);
+            double scale = h / CollapsedLimits.BaseHeight, inset = CollapsedLimits.CapsuleInset * scale;
+            var surface = new DipRect(area.X + Place(area.Width, w, offsetX), area.Y + y, w, h);
+            return new(style, surface, scale, inset, Math.Max(0, w - 2 * inset), h / 2, h / 2, 0);
+        }
+        double nheight = Math.Min(Value(height, CollapsedLimits.NotchHeightMin, CollapsedLimits.NotchHeightMax, CollapsedLimits.NotchHeightDefault) * s, screen.Height);
+        double nsaved = Value(width, CollapsedLimits.NotchWidthMin, CollapsedLimits.NotchWidthMax, CollapsedLimits.NotchWidthDefault) * s;
+        double nfit = Math.Max(CollapsedLimits.NotchWidthMin * s, SurfaceWidth(CompactStyle.Notch, nheight, wanted));
+        double nwidth = Math.Min(Math.Max(auto ? nfit : nsaved, SurfaceWidth(CompactStyle.Notch, nheight, required)), screen.Width);
+        double nscale = nheight / CollapsedLimits.BaseHeight, ninset = CollapsedLimits.NotchInset * nscale;
+        var nsurface = new DipRect(Place(screen.Width, nwidth, offsetX), 0, nwidth, nheight);
+        return new(CompactStyle.Notch, nsurface, nscale, ninset, Math.Max(0, nwidth - 2 * ninset), CollapsedLimits.NotchCorner * s, 0, CollapsedLimits.NotchShoulder * s);
+    }
+
     // The height a notch or capsule takes on this monitor for a saved height, as Resolve takes it: within the style's range and
     // no taller than the screen (notch) or the work area (capsule), at the scale. The line's thickness is returned as it is.
     public static double SurfaceHeight(CompactStyle style, double height, DipRect monitor, DipRect work, double scale = 1)

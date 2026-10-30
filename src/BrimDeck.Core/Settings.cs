@@ -49,6 +49,46 @@ public static class CompactParts
     // Each known part once, in the saved order; a part missing from the file takes its default place after the others.
     public static List<CompactPart> Normalize(IEnumerable<CompactPart>? order) => [.. (order ?? []).Where(part => Enum.IsDefined(part)).Concat(Default).Distinct()];
 }
+// One of the two collapsed islands in split mode. It chooses its own content and pages, and may take a size of its own;
+// a null Top or a zero size keeps the style's usual value. Pages are limited to the pages that are switched on globally.
+public sealed class IslandSettings
+{
+    public List<CompactPart> Parts { get; set; } = [];
+    public List<DeckPage> Pages { get; set; } = [];
+    public double Width { get; set; }
+    public double Height { get; set; }
+    // null keeps the style's top (CollapsedGeometry).
+    public double? Top { get; set; }
+    public double OffsetX { get; set; }
+
+    // The first island: a small music capsule, as Apple's small Live Activity.
+    public static IslandSettings Small() => new()
+    {
+        Parts = [CompactPart.Music, CompactPart.Equalizer], Pages = [DeckPage.Music], Width = 196, Height = 32
+    };
+    // The second island: the quotas, readings and clock, with the usage and monitor pages.
+    public static IslandSettings Large() => new()
+    {
+        Parts = [CompactPart.Rings, CompactPart.Monitor, CompactPart.Clock], Pages = [DeckPage.Usage, DeckPage.Monitor], Width = 360, Height = 32
+    };
+
+    public IslandSettings Copy() => new()
+    {
+        Parts = [.. Parts], Pages = [.. Pages], Width = Width, Height = Height, Top = Top, OffsetX = OffsetX
+    };
+
+    public void Normalize(IslandSettings fallback)
+    {
+        Parts = [.. (Parts ?? []).Where(part => Enum.IsDefined(part)).Distinct()];
+        if (Parts.Count == 0) Parts = [.. fallback.Parts];
+        Pages = [.. (Pages ?? []).Where(page => Enum.IsDefined(page)).Distinct()];
+        if (Pages.Count == 0) Pages = [.. fallback.Pages];
+        Width = double.IsFinite(Width) && Width > 0 ? Math.Clamp(Width, 48, 8000) : fallback.Width;
+        Height = double.IsFinite(Height) && Height > 0 ? Math.Clamp(Height, 24, 64) : fallback.Height;
+        Top = Top is { } top && double.IsFinite(top) ? Math.Clamp(top, 0, 4000) : fallback.Top;
+        OffsetX = double.IsFinite(OffsetX) ? Math.Clamp(OffsetX, -4000, 4000) : fallback.OffsetX;
+    }
+}
 // Saved settings keep the number, so a new style goes at the end.
 public enum ClockStyle { Minimal, Stacked, Digits, Dots, Segment, Neon, Serif, Wide, Condensed, Pixel, Rounded }
 // Every clock style takes this one color. Gradient spreads ClockGradient across the digits, Custom is ClockCustomColor,
@@ -284,6 +324,12 @@ public sealed class DeckSettings
     public double CapsuleOffsetX { get; set; } = CollapsedLimits.OffsetDefault;
     // Distance from the top of the work area. Saved up to 4000; each monitor stops the capsule at the bottom of its work area.
     public double CapsuleTop { get; set; } = CollapsedLimits.CapsuleTopDefault;
+    // Split mode: two collapsed islands side by side, one small and one large, each with its own content, pages and size.
+    // Off keeps the single island exactly as it was.
+    public bool SplitIslands { get; set; }
+    public int SplitGap { get; set; } = 10;
+    public IslandSettings Island1 { get; set; } = IslandSettings.Small();
+    public IslandSettings Island2 { get; set; } = IslandSettings.Large();
     public double LineLength { get; set; } = CollapsedLimits.LineLengthDefault;
     // In half-DIP steps.
     public double LineThickness { get; set; } = CollapsedLimits.LineThicknessDefault;
@@ -323,7 +369,15 @@ public sealed class DeckSettings
     public CompactMusicText MusicText { get; set; }
     public bool MusicTrackNotice { get; set; } = true;
     public bool MusicIndicatorProgress { get; set; } = true;
+    // The collapsed island's shadow takes the playing song's cover color as a soft halo while music plays.
+    public bool CoverGlow { get; set; } = true;
     public bool LyricsEnabled { get; set; } = true;
+    // A thin line under the current lyric fills as the line is sung.
+    public bool LyricProgress { get; set; } = true;
+    // The user's lyric offset in milliseconds: positive values show lyric lines earlier, negative values later. Stored as
+    // whole milliseconds because the settings slider works in whole numbers; LyricOffset is the same value in seconds.
+    public int LyricOffsetMs { get; set; }
+    [JsonIgnore] public double LyricOffset => LyricOffsetMs / 1000.0;
     // How many bars the music page's equalizer has, beside the title; its bars keep their spacing, so more bars make it longer.
     public int MusicEqualizerBars { get => _musicEqualizerBars; set => _musicEqualizerBars = CompactMusicLayout.SafeBars(value); }
     // Offers "网易云音乐 · 完整控制" in the source menu, or alone in its place when nothing plays.
@@ -432,6 +486,11 @@ public sealed class DeckSettings
     public bool SettingsWindowMaximized { get; set; }
     // Shows the compact notice when a quota rises into the warning or critical level.
     public bool QuotaAlerts { get; set; } = true;
+    // Shows a short notice in the collapsed row when WeChat receives a message. The watcher only reads the notification
+    // window's title and place; it never reads message contents.
+    public bool WechatNotices { get; set; } = true;
+    // Reads activity.json from the data folder and shows a short activity from another program in the collapsed island.
+    public bool ActivityBridge { get; set; } = true;
     // Also reads the Claude Code and Codex CLI session records inside WSL distributions. Off by default: it starts stopped distributions.
     public bool IncludeWsl { get; set; }
     // The ordered application list; the order is the column order of the expanded panel. Claude and Codex are shown
@@ -454,6 +513,10 @@ public sealed class DeckSettings
     public void SetCompactOrder(CompactStyle style, IEnumerable<CompactPart> order) { if (style == CompactStyle.Notch) NotchOrder = [.. order]; else if (style == CompactStyle.Capsule) CapsuleOrder = [.. order]; }
     public bool CompactAutoWidth(CompactStyle style) => style switch { CompactStyle.Notch => NotchAutoWidth, CompactStyle.Capsule => CapsuleAutoWidth, _ => false };
     public void SetCompactAutoWidth(CompactStyle style, bool value) { if (style == CompactStyle.Notch) NotchAutoWidth = value; else if (style == CompactStyle.Capsule) CapsuleAutoWidth = value; }
+    // Split mode is available for the notch and the capsule; the line has no content to divide.
+    [JsonIgnore] public bool SplitShown => SplitIslands && Style != CompactStyle.Line;
+    public IslandSettings? IslandFor(int lane) => !SplitShown ? null : lane == 0 ? Island1 : lane == 1 ? Island2 : null;
+    public bool LaneShows(int lane, CompactPart part) => IslandFor(lane)?.Parts.Contains(part) == true;
     // The saved width of the notch or the capsule, or the line's length.
     public void SetCompactWidth(CompactStyle style, double width)
     {
@@ -461,12 +524,16 @@ public sealed class DeckSettings
     }
     // Media is detected for the expanded music page, the chosen style's music or equalizer, or an indicator that shows playback
     // progress; a window rule can turn any style into the indicator.
-    [JsonIgnore] public bool MediaWanted => MusicPage || ShowsMusic(Style) || ShowsEqualizer(Style) || MusicIndicatorProgress
+    [JsonIgnore] public bool MediaWanted => MusicPage || (SplitShown
+        ? LaneShows(0, CompactPart.Music) || LaneShows(0, CompactPart.Equalizer) || LaneShows(1, CompactPart.Music) || LaneShows(1, CompactPart.Equalizer)
+        : ShowsMusic(Style) || ShowsEqualizer(Style)) || MusicIndicatorProgress
         && (Style == CompactStyle.Line || Maximized == WindowBehavior.Line || Borderless == WindowBehavior.Line || Exclusive == WindowBehavior.Line);
     // The switched-on applications. Their quotas are read for the AI usage page or for the rings of the chosen compact
     // style; the two are shown independently, so either one keeps the data current.
     [JsonIgnore] public IReadOnlyList<AppEntry> ConfiguredApps => Apps.Where(app => app.Enabled).ToList();
-    [JsonIgnore] public bool QuotaWanted => UsagePage || ShowsSummary(Style);
+    [JsonIgnore] public bool QuotaWanted => UsagePage || (SplitShown
+        ? LaneShows(0, CompactPart.Rings) || LaneShows(1, CompactPart.Rings)
+        : ShowsSummary(Style));
     [JsonIgnore] public IReadOnlyList<AppEntry> EnabledApps => QuotaWanted ? ConfiguredApps : [];
     [JsonIgnore] public IReadOnlySet<ProviderId> RequiredProviders => EnabledApps.SelectMany(app => new[] { app.QuotaSource, app.UsageSource }).ToHashSet();
     [JsonIgnore] public IReadOnlyList<ProviderId> StatisticsProviders => EnabledApps.Select(app => app.UsageSource).Distinct().ToList();
@@ -516,6 +583,7 @@ public sealed class DeckSettings
         copy._readings = _readings?.Select(reading => reading?.Copy()!).ToList();
         copy.MonitorCustomColors = (MonitorCustomColors ?? new()).Copy();
         copy._notchOrder = [.. _notchOrder]; copy._capsuleOrder = [.. _capsuleOrder]; copy._pageOrder = [.. _pageOrder];
+        copy.Island1 = Island1.Copy(); copy.Island2 = Island2.Copy();
         copy.ClockGradient = [.. ClockGradient ?? [.. ClockColors.Sunset]];
         copy.DisplayMonitors = [.. DisplayMonitors ?? []];
         copy.ThemeChoices = (ThemeChoices ?? []).ToDictionary(pair => pair.Key, pair => pair.Value.Copy());
@@ -570,6 +638,7 @@ public sealed class DeckSettings
         CompactMonitor = Core.CompactMonitor.Preset(CompactReadings) ?? CompactMonitorMode.Custom;
         CompactMonitorItems = Core.CompactMonitor.Shown(CompactReadings);
         if (!Enum.IsDefined(MusicText)) MusicText = CompactMusicText.None;
+        LyricOffsetMs = Math.Clamp(LyricOffsetMs, -3000, 3000);
         if (!Enum.IsDefined(ClockStyle)) ClockStyle = ClockStyle.Minimal;
         if (!Enum.IsDefined(ClockColor)) ClockColor = ClockColor.White;
         ClockCustomColor = AppPresets.NormalizeColor(ClockCustomColor) is { Length: > 0 } custom ? custom : ClockColors.DefaultCustom;
@@ -596,6 +665,9 @@ public sealed class DeckSettings
         CapsuleHeight = Fit(CapsuleHeight, CollapsedLimits.CapsuleHeightMin, CollapsedLimits.CapsuleHeightMax, CollapsedLimits.CapsuleHeightDefault);
         CapsuleOffsetX = Offset(CapsuleOffsetX);
         CapsuleTop = Fit(CapsuleTop, CollapsedLimits.CapsuleTopMin, CollapsedLimits.CapsuleTopMax, CollapsedLimits.CapsuleTopDefault);
+        SplitGap = Math.Clamp(SplitGap, 0, 80);
+        Island1 ??= IslandSettings.Small(); Island2 ??= IslandSettings.Large();
+        Island1.Normalize(IslandSettings.Small()); Island2.Normalize(IslandSettings.Large());
         LineLength = Fit(LineLength, CollapsedLimits.LineLengthMin, CollapsedLimits.LineLengthMax, CollapsedLimits.LineLengthDefault);
         LineThickness = CollapsedGeometry.RoundLineThickness(LineThickness);
         LineTop = Fit(LineTop, CollapsedLimits.LineTopMin, CollapsedLimits.LineTopMax, CollapsedLimits.LineTopDefault);

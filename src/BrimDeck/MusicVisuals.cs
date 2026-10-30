@@ -221,6 +221,9 @@ internal sealed class MusicMarquee : FrameworkElement
     // With Laps set (the collapsed row's title), the text scrolls that many whole cycles and then rests at its start until the
     // text changes or Replay is called; Rested starts it there. Without (the open page's lyric), it scrolls for as long as it may.
     public bool Laps { get; init; }
+    // The text scrolls to its end once and rests there until the text changes: a lyric line does not go back to its start while
+    // the same line is being sung. Without it, Laps counts whole cycles and restarts from the beginning.
+    public bool StayAtEnd { get; init; }
     public bool Rested { get => _rested; init => _rested = value; }
     // Raised once the laps are done, so the window can keep the text resting when the row is built again.
     public event Action? Finished;
@@ -360,11 +363,13 @@ internal sealed class MusicMarquee : FrameworkElement
             return;
         }
         ReleaseGlide();
-        // Its laps done, the text rests at its start with no clock or timer left.
-        bool done = Laps && _running && cycle.Done(played);
-        if (done) at = cycle.Played(played);
+        // A lyric line rests at its end after one glide; a title's laps rest at its start after the whole cycle.
+        bool once = StayAtEnd && _running && double.IsFinite(played) && played >= cycle.GlideEnd;
+        bool done = !once && Laps && _running && cycle.Done(played);
+        if (once) at = cycle.GlideEnd;
+        else if (done) at = cycle.Played(played);
         _shift.X = cycle.Shift(at); _unshift.X = cycle.Unshift(at); _left.Offset = cycle.Left(at); _right.Offset = cycle.Right(at);
-        if (done)
+        if (once || done)
         {
             _rested = true; _running = false; _since = double.NaN; _elapsed = 0; _turn.Stop();
             TextOptions.SetTextHintingMode(Painter, TextHintingMode.Auto);
@@ -460,7 +465,8 @@ internal sealed class MusicMarquee : FrameworkElement
         if (_glyphs is null) dc.PushClip(new RectangleGeometry(new Rect(size)));
         dc.PushTransform(_shift);
         double x = overflow == 0 && CenterWhenFits ? Snap((size.Width - text.Width) / 2) : 0;
-        dc.DrawText(text, new Point(x, Snap((size.Height - text.Height) / 2 + text.Baseline) - text.Baseline));
+        var place = new Point(x, Snap((size.Height - text.Height) / 2 + text.Baseline) - text.Baseline);
+        dc.DrawText(text, place);
         dc.Pop();
         if (_glyphs is null) dc.Pop(); else if (_fade is not null) dc.DrawRectangle(_fade, null, new Rect(size));
         UpdateAnimation();

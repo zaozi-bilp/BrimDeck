@@ -122,4 +122,110 @@ public sealed partial class LyricsService
         // Empty timestamp placeholders are not a usable lyric result and must not be cached.
         return lyrics.Lines.Any(l => !string.IsNullOrWhiteSpace(l.Text)) ? lyrics : Lyrics.Empty;
     }
+
+    // The searches tried for a song from another player, in order: the full title with its artist, the full title, the
+    // bracketed part alone (many Chinese titles put the part people search for in brackets), then the title without it.
+    // Kugou's own lyric search returns no candidates, so these public-catalog queries stand in for it.
+    public static IReadOnlyList<string> CatalogQueries(string title, string artist)
+    {
+        var queries = new List<string>();
+        void Add(string value)
+        {
+            value = Regex.Replace(value ?? "", @"\s+", " ").Trim();
+            if (value.Length > 0 && !queries.Contains(value)) queries.Add(value);
+        }
+        string decorated = title ?? "", artists = artist ?? "";
+        string core = Regex.Replace(decorated, @"[\(（\[【].*?[\)）\]】]", " ").Trim();
+        var bracketed = Regex.Matches(decorated, @"[\(（\[【](.*?)[\)）\]】]")
+            .Select(match => match.Groups[1].Value.Trim()).Where(value => value.Length > 0).ToArray();
+        Add($"{decorated} {artists}"); Add(decorated);
+        foreach (string part in bracketed) Add($"{part} {artists}");
+        foreach (string part in bracketed) Add(part);
+        if (core.Length > 0 && core != decorated) { Add($"{core} {artists}"); Add(core); }
+        return queries;
+    }
+
+    // Whether a catalog result is the same recording: a title variant matches, at least one of the track's artists is named,
+    // a version tag (live, accompaniment, remix) is not added, and a known duration is close.
+    public static bool CatalogMatch(MediaTrack track, string title, string artist, double seconds)
+    {
+        string candidateTitle = Normalize(title), candidateArtist = Normalize(artist);
+        if (candidateTitle.Length == 0) return false;
+        var variants = CatalogQueries(track.Title, "").Select(Normalize)
+            .Where(value => value.Length >= 2).Distinct(StringComparer.Ordinal).ToArray();
+        bool sameTitle = variants.Any(value => candidateTitle == value ||
+            candidateTitle.Contains(value, StringComparison.Ordinal) || value.Contains(candidateTitle, StringComparison.Ordinal));
+        if (!sameTitle) return false;
+        var wanted = Regex.Split(track.Artist, @"\s*[/、,，&;；]\s*").Select(Normalize).Where(value => value.Length > 0).ToArray();
+        if (wanted.Length > 0 && !wanted.Any(value => candidateArtist.Contains(value, StringComparison.Ordinal) || value.Contains(candidateArtist, StringComparison.Ordinal)))
+            return false;
+        foreach (string tag in new[] { "live", "现场", "伴奏", "remix", "dj", "cover", "翻唱", "纯音乐" })
+            if (candidateTitle.Contains(tag, StringComparison.OrdinalIgnoreCase) && !Normalize(track.Title).Contains(tag, StringComparison.OrdinalIgnoreCase))
+                return false;
+        return track.Duration.TotalSeconds <= 0 || seconds <= 0 || Math.Abs(seconds - track.Duration.TotalSeconds) <= 4;
+    }
+
+    // A song from a player without a lyric provider (Kugou): search QQ Music's public catalog and fetch the matched
+    // recording's LRC. The match's length is kept so the compact progress and the estimated position have an end.
+    private async Task<Lyrics> FindQqCatalog(MediaTrack track, CancellationToken token)
+    {
+        var tried = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string query in CatalogQueries(track.Title, track.Artist).Take(5))
+        {
+            var search = await Get("https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?format=json&p=1&n=20&w=" +
+                Uri.EscapeDataString(query), token);
+            if (search is not { ValueKind: JsonValueKind.Object } root || !QqSucceeded(root) ||
+                !root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object ||
+                !data.TryGetProperty("song", out var song) || song.ValueKind != JsonValueKind.Object ||
+                !song.TryGetProperty("list", out var list) || list.ValueKind != JsonValueKind.Array) continue;
+            var candidates = new List<(string Mid, string Title, double Seconds, bool ExactArtist)>();
+            foreach (var item in list.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object) continue;
+                string mid = Str(item, "songmid");
+                if (!Regex.IsMatch(mid, @"\A[a-zA-Z0-9]{8,32}\z") || !tried.Add(mid)) continue;
+                string title = WebUtility.HtmlDecode(Str(item, "songname"));
+                string artist = item.TryGetProperty("singer", out var singers) && singers.ValueKind == JsonValueKind.Array
+                    ? string.Join(" / ", singers.EnumerateArray().Where(s => s.ValueKind == JsonValueKind.Object).Select(s => WebUtility.HtmlDecode(Str(s, "name"))))
+                    : "";
+                double seconds = Num(item, "interval");
+                if (!CatalogMatch(track, title, artist, seconds)) continue;
+                var expected = Regex.Split(track.Artist, @"\s*[/、,，&;；]\s*").Select(Normalize).Where(value => value.Length > 0).ToHashSet();
+                var actual = Regex.Split(artist, @"\s*/\s*").Select(Normalize).Where(value => value.Length > 0).ToHashSet();
+                candidates.Add((mid, title, seconds, expected.SetEquals(actual)));
+            }
+            foreach (var candidate in candidates.OrderByDescending(value => value.ExactArtist)
+                .ThenBy(value => track.Duration > TimeSpan.Zero && value.Seconds > 0 ? Math.Abs(value.Seconds - track.Duration.TotalSeconds) : 0)
+                .Take(2))
+            {
+                var lyrics = await FindQqLyricsByMid(candidate.Mid, track, token);
+                if (lyrics.Lines.Count > 0)
+                    return candidate.Seconds > 0 ? lyrics with { Duration = TimeSpan.FromSeconds(candidate.Seconds) } : lyrics;
+            }
+        }
+        return Lyrics.Empty;
+    }
+
+    private async Task<Lyrics> FindQqLyricsByMid(string mid, MediaTrack track, CancellationToken token)
+    {
+        string payload = JsonSerializer.Serialize(new
+        {
+            comm = new { ct = 24, cv = 0 },
+            lyric = new { module = "music.musichallSong.PlayLyricInfo", method = "GetPlayLyricInfo", param = new { songMID = mid } }
+        });
+        var response = await Get("https://u.y.qq.com/cgi-bin/musicu.fcg?data=" + Uri.EscapeDataString(payload), token);
+        if (response is { } result && QqSucceeded(result) && result.TryGetProperty("lyric", out var lyric) && QqSucceeded(lyric) &&
+            lyric.TryGetProperty("data", out var content) && content.ValueKind == JsonValueKind.Object)
+        {
+            try
+            {
+                string text = Encoding.UTF8.GetString(Convert.FromBase64String(Str(content, "lyric")));
+                var parsed = ParseQq(text, track);
+                if (parsed.Lines.Count > 0) return parsed;
+            }
+            catch (FormatException) { }
+        }
+        var legacy = await Get($"https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={mid}&format=json&nobase64=1", token);
+        return legacy is { } old && QqSucceeded(old) ? ParseQq(Str(old, "lyric"), track) : Lyrics.Empty;
+    }
 }

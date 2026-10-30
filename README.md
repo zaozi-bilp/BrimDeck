@@ -1,3 +1,6 @@
+> **Personal fork (unofficial).** Based on [@MoFeng2223](https://github.com/MoFeng2223)'s BrimDeck [v1.2.3](https://github.com/MoFeng2223/BrimDeck/tree/v1.2.3).
+> See [FORK.md](FORK.md) for the changes, differences and credits.
+
 <div align="center">
 
 <a href="README.md"><img src="https://img.shields.io/badge/English-0A84FF?style=for-the-badge" alt="English"></a>
