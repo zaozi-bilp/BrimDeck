@@ -86,6 +86,9 @@ public partial class MainWindow
     {
         if (_poweringOff || _app.Exiting || _retiring) return;
         if (_expanded || IsSuppressed || !CanAnimateLifecycle) { SetImmediate(HoverZone, OpacityProperty, 1d); return; }
+        // The second island appears beside the first when split mode is turned on. Booting it would leave a dot on screen for
+        // the length of the animation, which reads as a failed switch; it appears at once and slides nowhere.
+        if (Lane > 0) { SetImmediate(HoverZone, OpacityProperty, 1d); return; }
         SetImmediate(HoverZone, OpacityProperty, 0d);
         _bootWaiting = true;
         int boot = ++_boot;

@@ -15,8 +15,6 @@ namespace BrimDeck;
 public partial class MainWindow : Window
 {
     private readonly App _app;
-    // Split mode's two islands come apart and go back together by sliding the whole stage; the retiring island fades out.
-    private readonly TranslateTransform _splitSlide = new();
     // Hover timing runs on PromptTimer rather than DispatcherTimer; see PromptTimer for why.
     private readonly PromptTimer _hover, _leave, _pointerTrack, _pageSwitchHold;
     private readonly DispatcherTimer _refresh = new() { Interval = TimeSpan.FromSeconds(60) };
@@ -124,7 +122,6 @@ public partial class MainWindow : Window
             if (_expanded && !_preview) PointerChanged(_pointerInside);
         }) { Interval = TimeSpan.FromSeconds(1) };
         InitializeComponent();
-        Stage.RenderTransform = _splitSlide;
         // Out of sight until the boot (or, without animations, until it has its place): the window shows before it is placed.
         HoverZone.Opacity = 0;
         _handover = new PageHandover(LeavingContent);
@@ -536,63 +533,6 @@ public partial class MainWindow : Window
     }
 
     // The compact island shows one ring per enabled application: the highest used share among its quotas.
-    // The two islands separate: this lane starts where a single island would sit and slides to its own place. The second
-    // island fades in as it slides out, so turning split mode on reads as one move rather than two windows appearing.
-    internal void BeginSeparate(bool fadeIn = false)
-    {
-        if (EffectiveStyle == CompactStyle.Line || !Settings.SplitShown) return;
-        var lane = Lane == 0 ? Settings.Island1 : Settings.Island2;
-        Slide(LaneX(lane, split: false) - Collapsed.Surface.X, fadeIn: fadeIn);
-    }
-    // The islands go back together: this lane slides from its split place to the single island's centre; the retiring second
-    // island does the same and fades out.
-    internal void BeginMerge(bool fadeOut = false)
-    {
-        if (EffectiveStyle == CompactStyle.Line || Settings.SplitShown) return;
-        double oldX = Lane == 0 ? LaneX(Settings.Island1, split: true) : Collapsed.Surface.X;
-        double newX = Lane == 0 ? Collapsed.Surface.X : ShapeFor(EffectiveStyle).Surface.X;
-        Slide(oldX - newX, fadeOut: fadeOut);
-    }
-    // Where a lane's collapsed surface lies with its own offset, either in its split place (split) or at the centre (not).
-    private double LaneX(IslandSettings lane, bool split)
-    {
-        bool capsule = EffectiveStyle == CompactStyle.Capsule;
-        double width = lane.Width > 0 ? lane.Width : capsule ? CollapsedLimits.CapsuleWidthDefault : CollapsedLimits.NotchWidthDefault;
-        double height = lane.Height > 0 ? lane.Height : capsule ? CollapsedLimits.CapsuleHeightDefault : CollapsedLimits.NotchHeightDefault;
-        double top = lane.Top ?? (capsule ? Settings.CapsuleTop : 0);
-        double offset = lane.OffsetX;
-        if (split)
-        {
-            var other = Lane == 0 ? Settings.Island2 : Settings.Island1;
-            double otherWidth = other.Width > 0 ? other.Width : capsule ? CollapsedLimits.CapsuleWidthDefault : CollapsedLimits.NotchWidthDefault;
-            offset += (Lane == 0 ? -1 : 1) * (otherWidth + Settings.SplitGap) / 2;
-        }
-        return CollapsedGeometry.Resolve(EffectiveStyle, MonitorBoundsDip, WorkDip, width, height, top, offset, _pixelsPerDip,
-            contentWanted: null, contentRequired: _compactRequired, panelScale: _scale).Surface.X;
-    }
-    private void Slide(double delta, bool fadeIn = false, bool fadeOut = false)
-    {
-        bool animate = Settings.Animations && SystemParameters.ClientAreaAnimation;
-        if (Math.Abs(delta) > .5 && animate)
-        {
-            _splitSlide.X = delta;
-            var move = new DoubleAnimation(0, TimeSpan.FromMilliseconds(300)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }, FillBehavior = FillBehavior.Stop };
-            _splitSlide.BeginAnimation(TranslateTransform.XProperty, move);
-        }
-        else _splitSlide.X = 0;
-        if (fadeIn && animate)
-        {
-            Island.Opacity = 1;
-            Island.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(300)));
-        }
-        if (fadeOut)
-        {
-            if (!animate) { Island.Opacity = 0; return; }
-            var fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(300)) { FillBehavior = FillBehavior.Stop };
-            fade.Completed += (_, _) => Island.Opacity = 0;
-            Island.BeginAnimation(OpacityProperty, fade);
-        }
-    }
     internal void RenderCompact()
     {
         var fade = RowFadeStart();

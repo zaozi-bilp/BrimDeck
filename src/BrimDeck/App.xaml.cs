@@ -33,10 +33,6 @@ public partial class App : Application
     public IEnumerable<MainWindow> Decks => _otherDecks.Values.Concat(_splitDecks.Values).Prepend(Deck);
     public IReadOnlyList<DisplayInfo> Displays { get; private set; } = [];
     private bool _arrangePending;
-    // A split turned on or off animates once, after the panels have been laid out; the old second island fades out and is
-    // retired after the slide.
-    private bool _splitShownLast, _splitTurningOn, _splitTurningOff;
-    private readonly List<MainWindow> _splitRetiring = [];
     // Every panel shows the one set of players, and their lyrics are looked up once.
     internal MediaSessions? Media { get; private set; }
     internal event Action? MediaChanged;
@@ -97,7 +93,6 @@ public partial class App : Application
         RecordCrashes();
         var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BrimDeck");
         Store = new SettingsStore(folder); Settings = Store.Load();
-        _splitShownLast = Settings.SplitShown;
         // Before anything is read: a reading left unanswered when the last run ended stops now (SensorGuard).
         SensorGuard.Start(folder);
         UseLanguage();
@@ -300,20 +295,10 @@ public partial class App : Application
         Deck.Display = Displays.FirstOrDefault(d => d.Id == plan.Main);
         foreach (var id in _otherDecks.Keys.Except(plan.Others).ToList())
         { var deck = _otherDecks[id]; _otherDecks.Remove(id); deck.Retire(); }
-        // Split mode's second island follows the main panel's monitors. It is kept for the merge slide when the islands are
-        // one again, then retired by AnimateSplitTransition.
-        bool split = Settings.SplitShown;
-        _splitTurningOn = split && !_splitShownLast;
-        _splitTurningOff = !split && _splitShownLast;
-        _splitShownLast = split;
-        List<string> splitIds = split ? [.. plan.Others.Prepend(plan.Main)] : [];
+        // Split mode's second island follows the main panel's monitors. Its decks are retired when the islands are one again.
+        List<string> splitIds = Settings.SplitShown ? [.. plan.Others.Prepend(plan.Main)] : [];
         foreach (var id in _splitDecks.Keys.Except(splitIds).ToList())
-        {
-            var deck = _splitDecks[id]; _splitDecks.Remove(id);
-            if (_splitTurningOff) _splitRetiring.Add(deck); else deck.Retire();
-        }
-        if (_splitTurningOn || _splitTurningOff)
-            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, AnimateSplitTransition);
+        { var deck = _splitDecks[id]; _splitDecks.Remove(id); deck.Retire(); }
         // Panels are opened only once the main panel runs, so that they can take its data.
         if (!Deck.IsLoaded) return;
         foreach (var id in plan.Others)
@@ -332,32 +317,6 @@ public partial class App : Application
         }
         // A split left collapsed should settle to its idle memory; retiring a second island likewise gives its pages back.
         RequestTrim();
-    }
-    // Runs after the settings pass has laid both islands out, so the slide starts from the places on screen.
-    private void AnimateSplitTransition()
-    {
-        if (Exiting) return;
-        bool turningOn = _splitTurningOn, turningOff = _splitTurningOff;
-        _splitTurningOn = _splitTurningOff = false;
-        if (turningOn)
-        {
-            foreach (var deck in Decks.ToArray()) deck.BeginSeparate(fadeIn: deck.Lane != 0);
-            return;
-        }
-        if (!turningOff) return;
-        foreach (var deck in Decks.Where(deck => deck.Lane == 0).ToArray()) deck.BeginMerge();
-        var retiring = _splitRetiring.ToList();
-        _splitRetiring.Clear();
-        foreach (var deck in retiring) deck.BeginMerge(fadeOut: true);
-        var timer = new DispatcherTimer(DispatcherPriority.Loaded) { Interval = TimeSpan.FromMilliseconds(320) };
-        timer.Tick += (_, _) =>
-        {
-            timer.Stop();
-            if (Exiting) return;
-            foreach (var deck in retiring) deck.Retire();
-            RequestTrim();
-        };
-        timer.Start();
     }
     internal void StartMedia()
     {
